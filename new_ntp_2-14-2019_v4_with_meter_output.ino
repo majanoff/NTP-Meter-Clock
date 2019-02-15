@@ -1,0 +1,218 @@
+
+
+  /*
+  Udp NTP Client with DNS
+
+  I updated the example code to use DNS resolution from the Arduino 1.0 IDE
+
+  Basically tries to use the load-balanced NTP servers which are
+    "magically" returned from DNS queries on pool.ntp.org
+  If DNS fails, fall back to the hardcoded IP address
+    for time.nist.gov
+
+  bearpaw7 (github), 01DEC2011
+
+  This code is also in the public domain.
+*/
+
+/*
+
+ Udp NTP Client
+
+ Get the time from a Network Time Protocol (NTP) time server
+ Demonstrates use of UDP sendPacket and ReceivePacket 
+ For more on NTP time servers and the messages needed to communicate with them, 
+ see http://en.wikipedia.org/wiki/Network_Time_Protocol
+
+ created 4 Sep 2010 
+ by Michael Margolis
+ modified 17 Sep 2010
+ by Tom Igoe
+ modified by Mitchell Janoff 14 Feb 2019 
+ for clock output to analog volt meters
+ This code is in the public domain.
+
+ */
+
+#include <SPI.h>     
+#include <Ethernet.h>
+#include <EthernetUdp.h>
+#include "Dns.h"
+
+// Enter a MAC address for your controller below.
+// Newer Ethernet shields have a MAC address printed on a sticker on the shield
+byte mac[] = {  0x00, 0x00, 0xAA, 0xBB, 0xCC, 0xDD};
+unsigned int localPort = 80;        // local port to listen for UDP packets
+IPAddress timeServer(193,92,150,3);     // time.nist.gov NTP server (fallback)
+const int NTP_PACKET_SIZE= 48;        // NTP time stamp is in the first 48 bytes of the message
+byte packetBuffer[ NTP_PACKET_SIZE];      // buffer to hold incoming and outgoing packets 
+const char* host = "nsath.forthnet.gr";     // Use random servers through DNS
+
+// A UDP instance to let us send and receive packets over UDP
+EthernetUDP Udp;
+DNSClient Dns;
+IPAddress rem_add;
+int seconds = 0;
+int old_second=0;
+int minutes = 0;
+int hours = 0;
+
+int meterP_H9 = 9;           // the PWM pin the LED is attached to
+int meterP_M3 = 3;
+int meterP_S5 = 5;
+int count;
+//                        0   1  2  3  4  5  6  7  8  9  10  11  12  13  14  15  16  17  18  19  20  21  22  23 
+int meter_hour_A[24] =   {30,37,44,51,58,65,72,79,86,93,100,107,113,120,127,135,142,149,156,163,170,177,184,190};
+//                         0  1  2  3  4  5  6  7  8  9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37  38  39  40  41  42  43  44  45  46  47  48  49  50  51  52  53  54  55  56  57  58  59  
+int meter_minute_A[60] = {24,26,28,30,32,34,36,38,40,42,44,46,48,50,52,54,56,58,60,62,64,66,68,70,72,74,76,78,80,82,84,86,88,90,92,94,96,98,100,102,104,106,108,110,112,114,116,118,120,122,124,126,128,130,132,134,136,138,140,142};
+//                         0  1  2  3  4  5  6  7  8  9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39 40 41 42 43 44  45 46  47  48  49  50  51  52  53  54  55  56  57  58  59   
+int meter_second_A[60] = {14,16,18,20,22,24,26,28,29,30,31,32,34,36,38,40,42,44,45,48,50,52,54,56,58,60,62,64,66,68,70,72,74,76,78,80,82,84,86,88,90,92,94,96,98,100,102,104,106,108,110,112,114,116,118,120,121,122,124,125};
+int meter_hour;
+int meter_minute;
+int meter_second;
+int hour_offset;
+int minute_offset;
+int second_offset;
+int offset;
+
+void setup() 
+{
+  Serial.begin(9600);
+  
+  // start Ethernet and UDP
+  if (Ethernet.begin(mac) == 0) {
+    Serial.println("Failed to configure Ethernet using DHCP");
+    // no point in carrying on, so do nothing forevermore:
+    while(true);
+  }
+  Udp.begin(localPort);
+  Dns.begin(Ethernet.dnsServerIP() );
+  for (meter_minute=0; meter_minute<60; meter_minute++)
+  {
+   write_minute();
+   Serial.println(meter_minute);
+   delay (500);
+ }
+// for (meter_second=0; meter_second<60; meter_second=meter_second+1)
+// {
+//  write_second();
+//  delay (1000);
+// }
+}
+
+void loop()
+{
+  if(Dns.getHostByName(host, rem_add) == 1 ){
+ //   Serial.println("DNS resolve...");  
+ //   Serial.print(host);
+ //   Serial.print("  = ");
+ //   Serial.println(rem_add);
+    sendNTPpacket(rem_add);
+  }else{
+ //   Serial.print("DNS fail...");
+ //   Serial.print("time.nist.gov = ");
+ //   Serial.println(timeServer); // fallback
+    sendNTPpacket(timeServer);  // send an NTP packet to a time server
+  }
+  delay(100);  // wait to see if a reply is available
+  if ( Udp.parsePacket() ) {  
+    // We've received a packet, read the data from it
+    Udp.read(packetBuffer,NTP_PACKET_SIZE);  // read the packet into the buffer
+    
+    //the timestamp starts at byte 40 of the received packet and is four bytes,
+    // or two words, long. First, esxtract the two words:
+    
+    unsigned long highWord = word(packetBuffer[40], packetBuffer[41]);
+    unsigned long lowWord = word(packetBuffer[42], packetBuffer[43]);  
+    // combine the four bytes (two words) into a long integer
+    // this is NTP time (seconds since Jan 1 1900):
+    unsigned long secsSince1900 = highWord << 16 | lowWord;  
+ //   Serial.print("Seconds since Jan 1 1900 = " );
+ //   Serial.println(secsSince1900);         
+    
+    // now convert NTP time into everyday time:
+//    Serial.print("Unix time = ");
+    // Unix time starts on Jan 1 1970. In seconds, that's 2208988800:
+    const unsigned long seventyYears = 2208988800UL;   
+    // subtract seventy years:
+    unsigned long epoch = secsSince1900 - seventyYears;  
+    // print Unix time:
+//    Serial.println(epoch);                 
+    
+ // print the hour, minute and second:
+    meter_hour = (epoch  % 86400L) / 3600;
+    meter_minute = (epoch  % 3600) / 60;
+    meter_second = epoch % 60;
+    if (meter_second!=old_second)
+    {
+    old_second=meter_second;
+    Serial.print("The UTC time is ");   // UTC is the time at Greenwich Meridian (GMT)
+    Serial.print(meter_hour);   // print the hour (86400 equals secs per day)
+    Serial.print(':');  
+    if ( (meter_minute) < 10 ) {
+      // In the first 10 minutes of each hour, we'll want a leading '0'
+      Serial.print('0');
+    }
+    Serial.print(meter_minute); // print the minute (3600 equals secs per minute)
+    Serial.print(':'); 
+    if ( meter_second < 10 ) {
+      // In the first 10 seconds of each minute, we'll want a leading '0'
+      Serial.print('0');
+    }
+    Serial.println(meter_second); // print the second
+ 
+  // wait xxx seconds before asking for the time again
+   
+  Serial.println(" ");
+ // hours and minutes plus fractions of the hour and minutes
+  write_hour();
+  write_minute();
+  write_second(); 
+  delay (700);
+}
+}
+}
+// send an NTP request to the time server at the given address 
+unsigned long sendNTPpacket(IPAddress& address)
+{
+  // set all bytes in the buffer to 0
+  memset(packetBuffer, 0, NTP_PACKET_SIZE); 
+  // Initialize values needed to form NTP request
+  // (see URL above for details on the packets)
+  packetBuffer[0] = 0b11100011;   // LI, Version, Mode
+  packetBuffer[1] = 0;     // Stratum, or type of clock
+  packetBuffer[2] = 6;     // Polling Interval
+  packetBuffer[3] = 0xEC;  // Peer Clock Precision
+  // 8 bytes of zero for Root Delay & Root Dispersion
+  packetBuffer[12]  = 49; 
+  packetBuffer[13]  = 0x4E;
+  packetBuffer[14]  = 49;
+  packetBuffer[15]  = 52;
+  
+  // all NTP fields have been given values, now
+  // you can send a packet requesting a timestamp: 
+  
+  Udp.beginPacket(address, 123); //NTP requests are to port 123
+  Udp.write(packetBuffer,NTP_PACKET_SIZE);
+  Udp.endPacket(); 
+}
+//  write to hour meter  
+    void write_hour()
+    {
+        if (meter_minute>29)
+          hour_offset=1;
+        else hour_offset=0;   
+        analogWrite(meterP_H9,meter_hour_A[meter_hour]);
+ 
+    }
+// write to minute meter  
+    void write_minute()  
+    {
+     analogWrite(meterP_M3,meter_minute_A[meter_minute]);
+    }
+ // write to second meter
+    void write_second()
+    {
+     analogWrite(meterP_S5,meter_second_A[meter_second]*2);
+    }
+   
